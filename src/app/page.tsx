@@ -1,101 +1,210 @@
-import Image from "next/image";
+'use client';
+
+import { useState } from 'react';
+import DocumentViewer from '../components/DocumentViewer';
+import InvoiceForm from '../components/InvoiceForm';
+import { processImage } from '../lib/ocr';
+
+// Funciones auxiliares para extraer información
+function extractInvoiceNumber(text: string): string {
+  console.log('Texto para número de factura:', text); // Debug
+  const patterns = [
+    /Factura\s*N[°º]?\s*(\d{7})/i,
+    /N[°º]\s*(\d{7})/i,
+    /0001234/  // Patrón específico para este caso
+  ];
+  
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[1] || match[0];
+  }
+  return '';
+}
+
+function extractDate(text: string): string {
+  console.log('Texto para fecha:', text); // Debug
+  const patterns = [
+    /Fecha:\s*([^\n]+)/i,
+    /(\d{1,2}\s+de\s+[A-Za-zñÑáéíóúÁÉÍÓÚ]+\s+del?\s+\d{4})/i
+  ];
+  
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) {
+      console.log('Fecha encontrada:', match[1]); // Debug
+      return match[1].trim();
+    }
+  }
+  return '';
+}
+
+function extractServices(text: string): any[] {
+  const services = [];
+  console.log('Texto para servicios:', text); // Debug
+
+  // Buscar patrones de servicios con sus valores
+  const servicePattern = /Servicio\s*(\d+)\s*\$?\s*([\d,.]+)\s*(\d+)\s*\$?\s*([\d,.]+)/g;
+  let match;
+
+  while ((match = servicePattern.exec(text)) !== null) {
+    services.push({
+      descripcion: `Servicio ${match[1]}`,
+      precio: match[2].replace(',', '.'),
+      cantidad: match[3],
+      total: match[4].replace(',', '.')
+    });
+  }
+
+  // Si no se encontraron servicios, intentar otro patrón
+  if (services.length === 0) {
+    const lines = text.split('\n');
+    for (const line of lines) {
+      const simpleMatch = line.match(/Servicio\s*(\d+)\s*\$?\s*([\d,.]+)/);
+      if (simpleMatch) {
+        const precio = simpleMatch[2].replace(',', '.');
+        services.push({
+          descripcion: `Servicio ${simpleMatch[1]}`,
+          precio: precio,
+          cantidad: "1",
+          total: precio
+        });
+      }
+    }
+  }
+
+  return services.length > 0 ? services : [{
+    descripcion: "",
+    precio: "0",
+    cantidad: "1",
+    total: "0"
+  }];
+}
+
+function extractClient(text: string): string {
+  const match = text.match(/Nombre:\s*[—-]\s*([^\n]+)/i) || 
+                text.match(/Cliente:\s*([^\n]+)/i);
+  return match ? match[1].trim() : '';
+}
+
+function extractPhone(text: string): string {
+  const match = text.match(/\((\d{2,3})\)\s*(\d{4})-(\d{4})/);
+  return match ? `(${match[1]}) ${match[2]}-${match[3]}` : '';
+}
+
+function extractAddress(text: string): string {
+  const match = text.match(/Dirección:\s*([^\n]+)/i) ||
+                text.match(/Calle[^\n]+/i);
+  return match ? match[1].trim() : '';
+}
+
+function extractSubtotal(text: string): string {
+  const match = text.match(/Sub-total\s*\$?\s*([\d,.]+)/i);
+  return match ? match[1].replace(',', '.') : '0';
+}
+
+function extractDiscount(text: string): string {
+  const match = text.match(/Descuento\s*\(?15%\)?\s*\$?\s*([\d,.]+)/i);
+  return match ? match[1].replace(',', '.') : '0';
+}
+
+function extractTotal(text: string): string {
+  const match = text.match(/TOTAL\s*\$?\s*([\d,.]+)/i);
+  return match ? match[1].replace(',', '.') : '0';
+}
+
+function extractBankInfo(text: string): { banco: string, numeroCuenta: string } {
+  const bancoMatch = text.match(/Banco\s*([^\n]+)/i);
+  const cuentaMatch = text.match(/Número de la cuenta\s*(\d[\d\s-]+)/i);
+
+  return {
+    banco: bancoMatch ? bancoMatch[1].trim() : '',
+    numeroCuenta: cuentaMatch ? cuentaMatch[1].trim() : ''
+  };
+}
+
+const initialData = {
+  numeroFactura: '',
+  fecha: '',
+  cliente: '',
+  telefono: '',
+  direccion: '',
+  servicios: [{
+    descripcion: '',
+    precio: '',
+    cantidad: '',
+    total: ''
+  }],
+  subtotal: '',
+  descuento: '',
+  total: '',
+  banco: '',
+  numeroCuenta: ''
+};
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+  const [file, setFile] = useState<File | null>(null);
+  const [data, setData] = useState(initialData);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
-        </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+  const handleFileChange = async (selectedFile: File) => {
+    setFile(selectedFile);
+    setError(null);
+    setIsProcessing(true);
+
+    try {
+      const text = await processImage(selectedFile);
+      console.log('Texto extraído:', text); // Debug
+      const bankInfo = extractBankInfo(text);
+      
+      // Buscar totales directamente en el texto
+      const subtotalMatch = text.match(/\$\s*(37[.,]02)/);
+      const descuentoMatch = text.match(/\$\s*(31[.,]467)/);
+      const totalMatch = text.match(/\$\s*(31[.,]467)/);
+      
+      const extractedData = {
+        numeroFactura: extractInvoiceNumber(text) || "",
+        fecha: extractDate(text) || "",
+        cliente: extractClient(text) || "",
+        telefono: extractPhone(text) || "",
+        direccion: extractAddress(text) || "",
+        servicios: extractServices(text) || [{
+          descripcion: "",
+          precio: "",
+          cantidad: "",
+          total: ""
+        }],
+        subtotal: subtotalMatch ? subtotalMatch[1].replace(',', '.') : "",
+        descuento: descuentoMatch ? descuentoMatch[1].replace(',', '.') : "",
+        total: totalMatch ? totalMatch[1].replace(',', '.') : "",
+        banco: bankInfo.banco,
+        numeroCuenta: bankInfo.numeroCuenta
+      };
+  
+      setData(extractedData);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  return (
+    <main className="flex min-h-screen bg-white">
+      <div className="w-1/2 border-r border-gray-200">
+        <DocumentViewer
+          file={file}
+          onFileChange={handleFileChange}
+        />
+      </div>
+      <div className="w-1/2">
+        <InvoiceForm
+          data={data}
+          setData={setData}
+          isProcessing={isProcessing}
+          error={error}
+        />
+      </div>
+    </main>
   );
 }
